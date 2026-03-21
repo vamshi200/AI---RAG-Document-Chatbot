@@ -1,478 +1,248 @@
 import re
-import torch
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+from typing import Dict, List
 
-MODEL_NAME = "google/flan-t5-small"
-
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
+from langchain_huggingface import HuggingFacePipeline
+from transformers import pipeline
 
 
 def get_llm():
-    return {"tokenizer": tokenizer, "model": model}
-
-
-def generate_text(llm, prompt, max_new_tokens=120):
-    inputs = llm["tokenizer"](
-        prompt,
-        return_tensors="pt",
-        truncation=True,
-        max_length=512
+    pipe = pipeline(
+        "text2text-generation",
+        model="google/flan-t5-base",
+        max_new_tokens=256,
+        temperature=0.1,
     )
-
-    with torch.no_grad():
-        outputs = llm["model"].generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            num_beams=4,
-            early_stopping=True
-        )
-
-    response = llm["tokenizer"].decode(outputs[0], skip_special_tokens=True)
-    return response.strip()
+    return HuggingFacePipeline(pipeline=pipe)
 
 
-def safe_not_found():
-    return "I could not verify that confidently from the uploaded document."
+def normalize_text(text: str) -> str:
+    if not text:
+        return ""
+    text = text.replace("\x00", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{2,}", "\n", text)
+    return text.strip()
 
 
-def normalize_spaces(text: str) -> str:
-    return " ".join(text.split())
-
-
-def get_full_text(docs, max_docs=20):
-    return "\n".join([doc.page_content for doc in docs[:max_docs]])
+def get_full_text(chunks) -> str:
+    if not chunks:
+        return ""
+    return "\n".join([doc.page_content for doc in chunks if getattr(doc, "page_content", None)])
 
 
 def detect_document_type(text: str) -> str:
     t = text.lower()
 
-    scores = {
-        "resume": 0,
-        "passport": 0,
-        "bank_statement": 0,
-        "driving_license": 0,
-        "invoice": 0,
-        "receipt": 0,
-        "flight_ticket": 0,
-        "boarding_pass": 0,
-        "travel_itinerary": 0,
-        "transcript": 0,
-        "contract": 0,
-        "meeting_notes": 0,
-        "policy_document": 0,
-        "book_or_article": 0,
-        "general": 0,
-    }
+    if any(x in t for x in ["passport", "nationality", "date of birth", "place of issue"]):
+        return "passport"
 
-    keyword_groups = {
-        "resume": [
-            "resume", "curriculum vitae", "cv", "employment history",
-            "education", "skills", "technical skills", "projects",
-            "professional summary", "work experience"
-        ],
-        "passport": [
-            "passport", "passport no", "passport number", "surname",
-            "given name", "given name(s)", "nationality", "nationailty",
-            "place of birth", "place of issue", "date of issue", "date of expiry"
-        ],
-        "bank_statement": [
-            "bank statement", "statement period", "account number",
-            "opening balance", "closing balance", "debit", "credit",
-            "transaction", "withdrawal", "deposit", "available balance"
-        ],
-        "driving_license": [
-            "driving licence", "driving license", "licence no", "license no",
-            "vehicle class", "date of issue", "valid till", "transport", "non-transport"
-        ],
-        "invoice": [
-            "invoice", "invoice number", "bill to", "amount due",
-            "subtotal", "total amount", "due date", "tax"
-        ],
-        "receipt": [
-            "receipt", "payment received", "thank you for your purchase", "transaction id"
-        ],
-        "flight_ticket": [
-            "flight", "pnr", "booking reference", "departure", "arrival", "e-ticket"
-        ],
-        "boarding_pass": [
-            "boarding pass", "gate", "seat", "boarding time", "zone"
-        ],
-        "travel_itinerary": [
-            "itinerary", "reservation", "check in", "check out", "travel plan"
-        ],
-        "transcript": [
-            "transcript", "semester", "gpa", "credits", "course", "grade"
-        ],
-        "contract": [
-            "agreement", "contract", "terms and conditions", "effective date",
-            "confidentiality", "termination"
-        ],
-        "meeting_notes": [
-            "meeting notes", "minutes of meeting", "agenda", "action items", "next steps"
-        ],
-        "policy_document": [
-            "policy", "procedure", "scope", "compliance", "guidelines"
-        ],
-        "book_or_article": [
-            "chapter", "author", "publisher", "isbn", "references", "table of contents"
-        ],
-    }
+    if any(x in t for x in ["education", "experience", "skills", "university", "linkedin", "github"]):
+        return "resume"
 
-    for doc_type, keywords in keyword_groups.items():
-        for kw in keywords:
-            if kw in t:
-                scores[doc_type] += 1
+    if any(x in t for x in ["statement period", "account number", "available balance", "opening balance"]):
+        return "bank_statement"
 
-    best_type = max(scores, key=scores.get)
-    return best_type if scores[best_type] > 0 else "general"
+    if any(x in t for x in ["invoice", "bill to", "total amount", "invoice number"]):
+        return "invoice"
+
+    if any(x in t for x in ["driving licence", "driver license", "license no", "dl no"]):
+        return "driving_license"
+
+    return "general_document"
 
 
-def is_summary_question(question: str) -> bool:
-    q = question.lower().strip()
-    patterns = [
-        "what is this document about",
-        "what is the document about",
-        "summarize this document",
-        "summarize the document",
-        "give me a summary",
-        "overview of this document",
-        "tell me about this document",
-        "what does this document contain",
-        "what are the key points",
-        "main points"
-    ]
-    return any(pattern in q for pattern in patterns)
+def extract_resume_email(text: str):
+    match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', text, re.I)
+    return match.group(0) if match else None
 
 
-def classify_question(question: str) -> str:
-    q = question.lower().strip()
-
-    unsupported_patterns = [
-        "favorite movie", "favourite movie", "favorite food", "favourite food",
-        "hobby", "hobbies", "girlfriend", "boyfriend", "relationship status",
-        "religion", "caste", "political", "opinion", "horoscope", "zodiac",
-        "how does he feel", "how does she feel", "love", "crush"
-    ]
-    for pattern in unsupported_patterns:
-        if pattern in q:
-            return "unsupported"
-
-    if is_summary_question(q):
-        return "summary"
-
-    if "passport number" in q or "passport no" in q:
-        return "passport_number"
-
-    if "nationality" in q:
-        return "nationality"
-
-    if "date of birth" in q or "dob" in q:
-        return "dob"
-
-    if "expiry date" in q or "date of expiry" in q or "expires" in q:
-        return "expiry_date"
-
-    if "date of issue" in q or "issue date" in q:
-        return "issue_date"
-
-    if "place of birth" in q:
-        return "place_of_birth"
-
-    if "place of issue" in q:
-        return "place_of_issue"
-
-    if "surname" in q:
-        return "surname"
-
-    if "given name" in q or "given names" in q:
-        return "given_name"
-
-    if "account number" in q:
-        return "account_number"
-
-    if "opening balance" in q:
-        return "opening_balance"
-
-    if "closing balance" in q:
-        return "closing_balance"
-
-    if "available balance" in q:
-        return "available_balance"
-
-    if "license number" in q or "licence number" in q or "license no" in q or "licence no" in q:
-        return "license_number"
-
-    if "vehicle class" in q:
-        return "vehicle_class"
-
-    if "valid till" in q or "validity" in q:
-        return "valid_till"
-
-    if (
-        "candidate name" in q
-        or "name mentioned" in q
-        or "what is the name" in q
-        or q == "what name is mentioned?"
-        or q == "what is the candidate name?"
-    ):
-        return "name"
-
-    if "email" in q:
-        return "email"
-
-    if "phone" in q or "contact number" in q or "mobile number" in q:
-        return "phone"
-
-    if "date" in q:
-        return "date"
-
-    return "unsupported"
-
-
-def extract_email(text: str):
-    matches = re.findall(r"[\w\.-]+@[\w\.-]+\.\w+", text)
-    return matches[0] if matches else None
-
-
-def extract_phone(text: str):
-    matches = re.findall(r"(\+?\d[\d\-\s\(\)]{8,}\d)", text)
-    return normalize_spaces(matches[0]) if matches else None
-
-
-def extract_dates_ddmmyyyy(text: str):
-    matches = re.findall(r"\b\d{2}/\d{2}/\d{4}\b", text)
-    unique = []
-    for d in matches:
-        if d not in unique:
-            unique.append(d)
-    return unique[:20]
-
-
-def extract_years(text: str):
-    matches = re.findall(r"\b(19\d{2}|20\d{2})\b", text)
-    unique = []
-    for y in matches:
-        if y not in unique:
-            unique.append(y)
-    return unique[:10]
-
-
-def normalize_passport_ocr_text(text: str) -> str:
-    cleaned = text
-
-    cleaned = re.sub(
-        r"([A-Z])\s+([0-9])\s+([0-9])\s+([0-9])\s+([0-9])\s+([0-9])\s+([0-9])\s+([0-9])",
-        r"\1\2\3\4\5\6\7\8",
-        cleaned
-    )
-
-    cleaned = re.sub(r"\bI\s*N\s*D\s*I\s*A\s*N\b", "INDIAN", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"Given Name\(s\}", "Given Name(s)", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"Nationailty", "Nationality", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"Passoort", "Passport", cleaned, flags=re.IGNORECASE)
-
+def extract_resume_links(text: str):
+    links = re.findall(r'(https?://[^\s]+|www\.[^\s]+|linkedin\.com/[^\s]+|github\.com/[^\s]+)', text, re.I)
+    cleaned = []
+    for link in links:
+        value = link[0] if isinstance(link, tuple) else link
+        value = value.rstrip(".,);]")
+        cleaned.append(value)
     return cleaned
 
 
-def extract_passport_fields(text: str):
-    result = {}
-    cleaned = normalize_passport_ocr_text(text)
-    compact = re.sub(r"\s+", "", cleaned)
+def extract_resume_university(text: str):
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    university_patterns = [
+        r".*university.*",
+        r".*institute of technology.*",
+        r".*college.*",
+        r".*school.*",
+    ]
 
-    mrz_lines = []
-    for line in cleaned.splitlines():
-        line2 = line.strip().replace(" ", "")
-        if line2.startswith("P<") or "<" in line2:
-            mrz_lines.append(line2)
-
-    m = re.search(r"Passport No\.?\s*([A-Z][0-9]{7})", cleaned, flags=re.IGNORECASE)
-    if not m:
-        m = re.search(r"(?:passport\s*(?:no|number)?)[:\s]*([A-Z][0-9]{7})", cleaned, flags=re.IGNORECASE)
-    if not m:
-        m = re.search(r"\b([A-Z][0-9]{7})\b", compact)
-    if m:
-        result["passport_number"] = m.group(1).strip()
-
-    if "passport_number" not in result:
-        m = re.search(r"\b([A-Z][0-9]{7})<", compact)
-        if m:
-            result["passport_number"] = m.group(1).strip()
-
-    m = re.search(r"(?:Nationality|Nationailty)\s*.*?(INDIAN)", cleaned, flags=re.IGNORECASE)
-    if not m:
-        m = re.search(r"(?:Nationality|Nationailty).*?([A-Z]{3,})", cleaned, flags=re.IGNORECASE)
-    if not m:
-        m = re.search(r"\bINDIAN\b", compact, flags=re.IGNORECASE)
-    if not m:
-        for line in mrz_lines:
-            if line.startswith("P<IND"):
-                result["nationality"] = "INDIAN"
+    found = []
+    for line in lines:
+        low = line.lower()
+        for pattern in university_patterns:
+            if re.match(pattern, low):
+                found.append(line)
                 break
+
+    if found:
+        return list(dict.fromkeys(found))[:5]
+    return []
+
+
+def extract_resume_skills(text: str):
+    known_skills = [
+        "Python", "SQL", "Machine Learning", "Deep Learning", "Natural Language Processing",
+        "NLP", "Generative AI", "LLM", "LLMs", "RAG", "TensorFlow", "PyTorch", "Scikit-learn",
+        "Pandas", "NumPy", "Matplotlib", "Streamlit", "LangChain", "FAISS", "Hugging Face",
+        "AWS", "Docker", "Kubernetes", "Git", "GitHub", "Airflow", "Spark", "Tableau",
+        "Power BI", "Data Science", "Data Analysis", "Statistics", "ETL", "MLOps"
+    ]
+
+    found = []
+    lower_text = text.lower()
+
+    for skill in known_skills:
+        if skill.lower() in lower_text:
+            found.append(skill)
+
+    skill_section = re.search(
+        r"(skills|technical skills|core competencies|technologies)(.*?)(education|experience|projects|certifications|$)",
+        text,
+        re.I | re.S
+    )
+    if skill_section:
+        section_text = skill_section.group(2)
+        parts = re.split(r"[,|\n•]+", section_text)
+        for part in parts:
+            item = part.strip(" :-\t")
+            if 2 <= len(item) <= 40:
+                found.append(item)
+
+    cleaned = []
+    seen = set()
+    for item in found:
+        item = re.sub(r"\s+", " ", item).strip()
+        if item and item.lower() not in seen:
+            seen.add(item.lower())
+            cleaned.append(item)
+
+    return cleaned[:25]
+
+
+def extract_resume_companies(text: str):
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    companies = []
+
+    known_company_patterns = [
+        "broadridge", "evernorth", "massmutual", "aragen", "infosys", "tcs",
+        "wipro", "accenture", "amazon", "microsoft", "google", "meta", "ibm",
+        "deloitte", "cognizant", "capgemini", "oracle"
+    ]
+
+    for line in lines:
+        low = line.lower()
+        for company in known_company_patterns:
+            if company in low:
+                companies.append(line)
+                break
+
+    experience_block = re.search(
+        r"(experience|work experience|professional experience)(.*?)(projects|education|skills|certifications|$)",
+        text,
+        re.I | re.S
+    )
+    if experience_block:
+        block = experience_block.group(2)
+        block_lines = [x.strip() for x in block.splitlines() if x.strip()]
+        for line in block_lines:
+            if len(line.split()) <= 8 and not any(char.isdigit() for char in line):
+                if any(word[0].isupper() for word in line.split() if word):
+                    companies.append(line)
+
+    cleaned = []
+    seen = set()
+    for c in companies:
+        c = re.sub(r"\s+", " ", c).strip("•- ")
+        if c and c.lower() not in seen and len(c) <= 80:
+            seen.add(c.lower())
+            cleaned.append(c)
+
+    return cleaned[:15]
+
+
+def extract_passport_fields(text: str) -> Dict[str, str]:
+    data = {}
+
+    passport_match = re.search(r'\b[A-Z][0-9]{7}\b', text)
+    if passport_match:
+        data["passport_number"] = passport_match.group(0)
+
+    dob_match = re.search(r'(?:date of birth|birth)\s*[:\-]?\s*([0-9]{2}/[0-9]{2}/[0-9]{4})', text, re.I)
+    if dob_match:
+        data["date_of_birth"] = dob_match.group(1)
     else:
-        result["nationality"] = m.group(1).strip().upper()
+        all_dates = re.findall(r'\b[0-9]{2}/[0-9]{2}/[0-9]{4}\b', text)
+        if len(all_dates) >= 1:
+            data["date_of_birth"] = all_dates[0]
+        if len(all_dates) >= 2:
+            data["expiry_date"] = all_dates[-1]
 
-    m = re.search(r"Surname\s*([A-Z]+)", cleaned, flags=re.IGNORECASE)
-    if m:
-        result["surname"] = m.group(1).strip().upper()
+    exp_match = re.search(r'(?:expiry date|date of expiry|expiry)\s*[:\-]?\s*([0-9]{2}/[0-9]{2}/[0-9]{4})', text, re.I)
+    if exp_match:
+        data["expiry_date"] = exp_match.group(1)
 
-    m = re.search(r"Given Name\(s\)\s*([A-Z][A-Z]+)", cleaned, flags=re.IGNORECASE)
-    if not m:
-        m = re.search(r"(?:given name\(s\)|given names|given name)[:\s]*([A-Z][A-Za-z\s]+)", cleaned, flags=re.IGNORECASE)
-    if m:
-        result["given_name"] = normalize_spaces(m.group(1)).strip().upper()
+    nat_match = re.search(r'(?:nationality)\s*[:\-]?\s*([A-Z ]{3,})', text, re.I)
+    if nat_match:
+        data["nationality"] = nat_match.group(1).strip()
 
-    if ("surname" not in result or "given_name" not in result) and mrz_lines:
-        for line in mrz_lines:
-            if line.startswith("P<"):
-                m = re.search(r"P<[A-Z]{3}([A-Z<]+)<<([A-Z<]+)", line)
-                if m:
-                    surname = m.group(1).replace("<", " ").strip()
-                    given = m.group(2).replace("<", " ").strip()
-                    if surname and "surname" not in result:
-                        result["surname"] = surname.upper()
-                    if given and "given_name" not in result:
-                        result["given_name"] = given.upper()
+    poi_match = re.search(r'(?:place of issue)\s*[:\-]?\s*([A-Z ]{3,})', text, re.I)
+    if poi_match:
+        data["place_of_issue"] = poi_match.group(1).strip()
 
-    m = re.search(r"Date of Birth\s*(\d{2}/\d{2}/\d{4})", cleaned, flags=re.IGNORECASE)
-    if m:
-        result["dob"] = m.group(1)
+    name_match = re.search(r'(?:surname\s*[:\-]?\s*[A-Z]+.*?\n.*?given name[s]?\s*[:\-]?\s*[A-Z ]+)', text, re.I | re.S)
+    if name_match:
+        block = name_match.group(0)
+        surname = re.search(r'surname\s*[:\-]?\s*([A-Z]+)', block, re.I)
+        given = re.search(r'given name[s]?\s*[:\-]?\s*([A-Z ]+)', block, re.I)
+        if surname and given:
+            data["name"] = f"{given.group(1).strip()} {surname.group(1).strip()}".strip()
+    else:
+        upper_lines = [line.strip() for line in text.splitlines() if line.strip()]
+        probable_names = [line for line in upper_lines if line.isupper() and 2 <= len(line.split()) <= 4]
+        if probable_names:
+            data["name"] = probable_names[0]
 
-    m = re.search(r"Place of Birth\s*([A-Z][A-Za-z,\s]+)", cleaned, flags=re.IGNORECASE)
-    if m:
-        value = normalize_spaces(m.group(1)).strip(" ,.-")
-        value = re.split(r"Place of Issue|Date of Issue|Sex", value, flags=re.IGNORECASE)[0].strip(" ,.-")
-        result["place_of_birth"] = value.upper()
-
-    m = re.search(r"Place of Issue\s*([A-Z][A-Za-z,\s]+)", cleaned, flags=re.IGNORECASE)
-    if m:
-        value = normalize_spaces(m.group(1)).strip(" ,.-")
-        value = re.split(r"Date of Issue|Date of Expiry", value, flags=re.IGNORECASE)[0].strip(" ,.-")
-        result["place_of_issue"] = value.upper()
-
-    m = re.search(r"Date of Issue\s*(\d{2}/\d{2}/\d{4})", cleaned, flags=re.IGNORECASE)
-    if m:
-        result["issue_date"] = m.group(1)
-
-    m = re.search(r"Date of Expiry\s*(\d{2}/\d{2}/\d{4})", cleaned, flags=re.IGNORECASE)
-    if m:
-        result["expiry_date"] = m.group(1)
-
-    return result
+    return data
 
 
-def extract_bank_statement_fields(text: str):
-    result = {}
+def extract_known_fields(text: str, doc_type: str) -> Dict:
+    text = normalize_text(text)
 
-    m = re.search(r"(?:account number|a/c number|acct number)[:\s]*([A-Z0-9\-Xx]+)", text, flags=re.IGNORECASE)
-    if m:
-        result["account_number"] = m.group(1).strip()
-
-    m = re.search(r"(?:opening balance)[:\s₹$]*([0-9,]+(?:\.\d{1,2})?)", text, flags=re.IGNORECASE)
-    if m:
-        result["opening_balance"] = m.group(1)
-
-    m = re.search(r"(?:closing balance)[:\s₹$]*([0-9,]+(?:\.\d{1,2})?)", text, flags=re.IGNORECASE)
-    if m:
-        result["closing_balance"] = m.group(1)
-
-    m = re.search(r"(?:available balance|avail balance)[:\s₹$]*([0-9,]+(?:\.\d{1,2})?)", text, flags=re.IGNORECASE)
-    if m:
-        result["available_balance"] = m.group(1)
-
-    dates = extract_dates_ddmmyyyy(text)
-    if dates:
-        result["dates"] = dates
-
-    return result
-
-
-def extract_driving_license_fields(text: str):
-    result = {}
-
-    m = re.search(r"(?:license no|licence no|license number|licence number)[:\s]*([A-Z0-9\-\/]+)", text, flags=re.IGNORECASE)
-    if m:
-        result["license_number"] = m.group(1).strip()
-
-    m = re.search(r"(?:name)[:\s]*([A-Z][A-Za-z\s]+)", text, flags=re.IGNORECASE)
-    if m:
-        result["name"] = normalize_spaces(m.group(1)).strip()
-
-    m = re.search(r"(?:date of birth|dob)[:\s]*(\d{2}/\d{2}/\d{4})", text, flags=re.IGNORECASE)
-    if m:
-        result["dob"] = m.group(1)
-
-    m = re.search(r"(?:date of issue|issue date)[:\s]*(\d{2}/\d{2}/\d{4})", text, flags=re.IGNORECASE)
-    if m:
-        result["issue_date"] = m.group(1)
-
-    m = re.search(r"(?:valid till|validity|expiry date|date of expiry)[:\s]*(\d{2}/\d{2}/\d{4})", text, flags=re.IGNORECASE)
-    if m:
-        result["valid_till"] = m.group(1)
-
-    m = re.search(r"(?:vehicle class|class)[:\s]*([A-Z,\s\-]+)", text, flags=re.IGNORECASE)
-    if m:
-        result["vehicle_class"] = normalize_spaces(m.group(1)).strip()
-
-    return result
-
-
-def extract_known_fields(full_text: str, doc_type: str):
     if doc_type == "passport":
-        return extract_passport_fields(full_text)
-    if doc_type == "bank_statement":
-        return extract_bank_statement_fields(full_text)
-    if doc_type == "driving_license":
-        return extract_driving_license_fields(full_text)
+        return extract_passport_fields(text)
+
+    if doc_type == "resume":
+        return {
+            "email": extract_resume_email(text),
+            "links": extract_resume_links(text),
+            "universities": extract_resume_university(text),
+            "skills": extract_resume_skills(text),
+            "companies": extract_resume_companies(text),
+        }
+
     return {}
 
 
-def get_suggested_questions(doc_type: str, known_fields=None):
-    known_fields = known_fields or {}
-
+def get_suggested_questions(doc_type: str, known_fields: Dict) -> List[str]:
     if doc_type == "passport":
-        questions = ["What is this document about?"]
-        if known_fields.get("passport_number"):
-            questions.append("What passport number is mentioned?")
-        if known_fields.get("nationality"):
-            questions.append("What nationality is mentioned?")
-        if known_fields.get("dob"):
-            questions.append("What date of birth is mentioned?")
-        if known_fields.get("expiry_date"):
-            questions.append("What is the expiry date?")
-        if known_fields.get("place_of_issue"):
-            questions.append("What place of issue is mentioned?")
-        if known_fields.get("given_name") or known_fields.get("surname"):
-            questions.append("What name is mentioned?")
-        return questions
-
-    if doc_type == "bank_statement":
-        questions = ["What is this document about?"]
-        if known_fields.get("account_number"):
-            questions.append("What is the account number?")
-        if known_fields.get("opening_balance"):
-            questions.append("What is the opening balance?")
-        if known_fields.get("closing_balance"):
-            questions.append("What is the closing balance?")
-        if known_fields.get("available_balance"):
-            questions.append("What is the available balance?")
-        if known_fields.get("dates"):
-            questions.append("What date is mentioned?")
-        return questions
-
-    if doc_type == "driving_license":
-        questions = ["What is this document about?"]
-        if known_fields.get("license_number"):
-            questions.append("What license number is mentioned?")
-        if known_fields.get("name"):
-            questions.append("What name is mentioned?")
-        if known_fields.get("dob"):
-            questions.append("What is the date of birth?")
-        if known_fields.get("valid_till"):
-            questions.append("What is the expiry date?")
-        if known_fields.get("vehicle_class"):
-            questions.append("What vehicle class is mentioned?")
-        return questions
+        return [
+            "What is this document about?",
+            "What passport number is mentioned?",
+            "What nationality is mentioned?",
+            "What date of birth is mentioned?",
+            "What is the expiry date?",
+            "What place of issue is mentioned?",
+            "What name is mentioned?",
+        ]
 
     if doc_type == "resume":
         return [
@@ -480,129 +250,116 @@ def get_suggested_questions(doc_type: str, known_fields=None):
             "What university is mentioned?",
             "What skills are mentioned?",
             "What companies are mentioned?",
-            "What email address is mentioned?"
-        ]
-
-    if doc_type == "invoice":
-        return [
-            "What is the invoice number?",
-            "What is the total amount?",
-            "What date is mentioned?"
-        ]
-
-    if doc_type == "receipt":
-        return [
-            "What amount is mentioned?",
-            "What date is mentioned?"
+            "What email address is mentioned?",
         ]
 
     return [
         "What is this document about?",
-        "Summarize this document",
-        "What name is mentioned?",
-        "What date is mentioned?"
+        "Summarize this document.",
+        "What important information is mentioned?",
     ]
 
 
-def summarize_document(text: str, doc_type: str):
+def answer_from_known_fields(question: str, doc_type: str, known_fields: Dict):
+    q = question.lower().strip()
+
     if doc_type == "passport":
-        return "This document appears to be a passport or identity document. It contains personal identity details such as name, nationality, passport number, and issue or expiry dates."
-    if doc_type == "bank_statement":
-        return "This document appears to be a bank statement. It contains account, balance, and transaction-related details."
-    if doc_type == "driving_license":
-        return "This document appears to be a driving license. It contains identity and driving authorization details."
+        if "passport number" in q and known_fields.get("passport_number"):
+            return known_fields["passport_number"]
+        if ("nationality" in q or "citizenship" in q) and known_fields.get("nationality"):
+            return known_fields["nationality"]
+        if ("date of birth" in q or "birth" in q) and known_fields.get("date_of_birth"):
+            return known_fields["date_of_birth"]
+        if "expiry" in q and known_fields.get("expiry_date"):
+            return known_fields["expiry_date"]
+        if "place of issue" in q and known_fields.get("place_of_issue"):
+            return known_fields["place_of_issue"]
+        if "name" in q and known_fields.get("name"):
+            return known_fields["name"]
+        if "what is this document about" in q or "what is this document" in q:
+            return (
+                "This document appears to be a passport or identity document. "
+                "It contains personal identity details such as name, nationality, passport number, and issue or expiry dates."
+            )
+
     if doc_type == "resume":
-        return "This document appears to be a resume. It contains education, work experience, projects, and technical skills."
-    if doc_type == "invoice":
-        return "This document appears to be an invoice. It contains billing and payment details."
-    if doc_type == "receipt":
-        return "This document appears to be a receipt. It contains purchase and payment details."
-    return "This document appears to be a general document."
+        if "email" in q and known_fields.get("email"):
+            return known_fields["email"]
+
+        if ("university" in q or "college" in q or "school" in q) and known_fields.get("universities"):
+            return ", ".join(known_fields["universities"][:3])
+
+        if "skill" in q and known_fields.get("skills"):
+            return ", ".join(known_fields["skills"][:12])
+
+        if ("company" in q or "companies" in q or "organization" in q or "employer" in q) and known_fields.get("companies"):
+            return ", ".join(known_fields["companies"][:10])
+
+        if "what is this document about" in q or "what is this document" in q:
+            return (
+                "This document appears to be a resume. It contains professional information such as education, "
+                "skills, experience, projects, and contact details."
+            )
+
+    return None
 
 
-def answer_rule_based(question: str, full_text: str, doc_type: str):
-    question_type = classify_question(question)
-
-    if question_type == "unsupported":
-        return safe_not_found()
-
-    if question_type == "summary":
-        return summarize_document(full_text, doc_type)
-
-    if doc_type == "passport":
-        fields = extract_passport_fields(full_text)
-
-        if question_type == "passport_number":
-            return fields.get("passport_number", safe_not_found())
-        if question_type == "nationality":
-            return fields.get("nationality", safe_not_found())
-        if question_type == "dob":
-            return fields.get("dob", safe_not_found())
-        if question_type == "issue_date":
-            return fields.get("issue_date", safe_not_found())
-        if question_type == "expiry_date":
-            return fields.get("expiry_date", safe_not_found())
-        if question_type == "place_of_birth":
-            return fields.get("place_of_birth", safe_not_found())
-        if question_type == "place_of_issue":
-            return fields.get("place_of_issue", safe_not_found())
-        if question_type == "surname":
-            return fields.get("surname", safe_not_found())
-        if question_type == "given_name":
-            return fields.get("given_name", safe_not_found())
-        if question_type == "name":
-            given = fields.get("given_name")
-            surname = fields.get("surname")
-            if given and surname:
-                return f"{given} {surname}"
-            return given or surname or safe_not_found()
-
-    if doc_type == "bank_statement":
-        fields = extract_bank_statement_fields(full_text)
-        if question_type == "account_number":
-            return fields.get("account_number", safe_not_found())
-        if question_type == "opening_balance":
-            return fields.get("opening_balance", safe_not_found())
-        if question_type == "closing_balance":
-            return fields.get("closing_balance", safe_not_found())
-        if question_type == "available_balance":
-            return fields.get("available_balance", safe_not_found())
-        if question_type == "date":
-            return ", ".join(fields.get("dates", [])[:5]) if fields.get("dates") else safe_not_found()
-
-    if doc_type == "driving_license":
-        fields = extract_driving_license_fields(full_text)
-        if question_type == "license_number":
-            return fields.get("license_number", safe_not_found())
-        if question_type == "name":
-            return fields.get("name", safe_not_found())
-        if question_type == "dob":
-            return fields.get("dob", safe_not_found())
-        if question_type == "issue_date":
-            return fields.get("issue_date", safe_not_found())
-        if question_type == "expiry_date":
-            return fields.get("valid_till", safe_not_found())
-        if question_type == "vehicle_class":
-            return fields.get("vehicle_class", safe_not_found())
-
-    if question_type == "email":
-        return extract_email(full_text) or safe_not_found()
-
-    if question_type == "phone":
-        return extract_phone(full_text) or safe_not_found()
-
-    if question_type == "date":
-        dates = extract_dates_ddmmyyyy(full_text)
-        if dates:
-            return ", ".join(dates[:5])
-        years = extract_years(full_text)
-        return ", ".join(years[:5]) if years else safe_not_found()
-
-    return safe_not_found()
+def build_context(relevant_docs) -> str:
+    if not relevant_docs:
+        return ""
+    return "\n\n".join([doc.page_content for doc in relevant_docs if getattr(doc, "page_content", None)])
 
 
-def answer_question(llm, docs, question, all_chunks=None):
-    source_docs = all_chunks if all_chunks else docs
-    full_text = get_full_text(source_docs)
+def answer_question(llm, relevant_docs, question: str, all_chunks=None) -> str:
+    full_text = get_full_text(all_chunks if all_chunks else relevant_docs)
+    full_text = normalize_text(full_text)
+
     doc_type = detect_document_type(full_text)
-    return answer_rule_based(question, full_text, doc_type)
+    known_fields = extract_known_fields(full_text, doc_type)
+
+    direct_answer = answer_from_known_fields(question, doc_type, known_fields)
+    if direct_answer:
+        return direct_answer
+
+    context = build_context(relevant_docs)
+
+    if not context.strip():
+        return "I could not verify that confidently from the uploaded document."
+
+    prompt = f"""
+You are a document question answering assistant.
+
+Answer the user's question only from the context below.
+If the answer is not clearly present in the context, say exactly:
+I could not verify that confidently from the uploaded document.
+
+Context:
+{context}
+
+Question:
+{question}
+
+Answer:
+"""
+
+    try:
+        response = llm.invoke(prompt).strip()
+    except Exception:
+        return "I could not verify that confidently from the uploaded document."
+
+    bad_signals = [
+        "not mentioned in the context",
+        "not provided in the context",
+        "cannot be determined",
+        "not enough information",
+        "i do not know",
+        "unknown",
+    ]
+
+    if not response:
+        return "I could not verify that confidently from the uploaded document."
+
+    if any(signal in response.lower() for signal in bad_signals):
+        return "I could not verify that confidently from the uploaded document."
+
+    return response
