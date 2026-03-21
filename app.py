@@ -117,12 +117,6 @@ st.markdown("""
         line-height: 1.82;
     }
 
-    .small-text {
-        font-size: 0.94rem;
-        color: #dbe4f0;
-        line-height: 1.72;
-    }
-
     .section-title {
         font-size: 1.08rem;
         font-weight: 800;
@@ -305,20 +299,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-nav_left, nav_mid, nav_right, _ = st.columns([1, 1, 1, 5])
-
-with nav_left:
-    if st.button("Project Home"):
-        st.session_state.page = "home"
-
-with nav_mid:
-    if st.button("Project Details"):
-        st.session_state.page = "details"
-
-with nav_right:
-    if st.button("Live Demo"):
-        st.session_state.page = "demo"
-
 
 def save_feedback(name: str, email: str, feedback_type: str, message: str):
     FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
@@ -337,6 +317,21 @@ def save_feedback(name: str, email: str, feedback_type: str, message: str):
         ])
 
 
+nav_left, nav_mid, nav_right, _ = st.columns([1, 1, 1, 5])
+
+with nav_left:
+    if st.button("Project Home"):
+        st.session_state.page = "home"
+
+with nav_mid:
+    if st.button("Project Details"):
+        st.session_state.page = "details"
+
+with nav_right:
+    if st.button("Live Demo"):
+        st.session_state.page = "demo"
+
+
 if st.session_state.page == "home":
     left, right = st.columns([1.02, 1.68], gap="large")
 
@@ -346,15 +341,15 @@ if st.session_state.page == "home":
 
         st.markdown("""
         <div class="link-grid">
-            <a class="contact-pill" href="https://www.linkedin.com/in/vamshi-kardhanoori/" target="_blank" title="Connect professionally on LinkedIn">
+            <a class="contact-pill" href="https://www.linkedin.com/in/vamshi-kardhanoori/" target="_blank">
                 <span class="contact-icon">in</span>
                 <span>LinkedIn</span>
             </a>
-            <a class="contact-pill" href="https://github.com/vamshi200" target="_blank" title="View repositories and code">
+            <a class="contact-pill" href="https://github.com/vamshi200" target="_blank">
                 <span class="contact-icon">GH</span>
                 <span>GitHub</span>
             </a>
-            <a class="contact-pill" href="mailto:vamshikardhanoori@gmail.com" title="Contact through email">
+            <a class="contact-pill" href="mailto:vamshikardhanoori@gmail.com">
                 <span class="contact-icon">@</span>
                 <span>vamshikardhanoori@gmail.com</span>
             </a>
@@ -448,13 +443,13 @@ if st.session_state.page == "home":
                     <span class="tooltip-text">The technologies and problem spaces I am actively building in.</span>
                 </span>
             </div>
-            <span class="chip" title="Machine Learning systems and practical modeling workflows">Machine Learning</span>
-            <span class="chip" title="Generative AI applications and intelligent assistants">Generative AI</span>
-            <span class="chip" title="Large Language Model systems and workflows">LLMs</span>
-            <span class="chip" title="Natural Language Processing for documents and text">NLP</span>
-            <span class="chip" title="Retrieval Augmented Generation pipelines">RAG Systems</span>
-            <span class="chip" title="Applied AI products and user facing systems">AI Applications</span>
-            <span class="chip" title="Real world document analysis and extraction systems">Document Intelligence</span>
+            <span class="chip">Machine Learning</span>
+            <span class="chip">Generative AI</span>
+            <span class="chip">LLMs</span>
+            <span class="chip">NLP</span>
+            <span class="chip">RAG Systems</span>
+            <span class="chip">AI Applications</span>
+            <span class="chip">Document Intelligence</span>
         </div>
         """, unsafe_allow_html=True)
 
@@ -720,7 +715,7 @@ elif st.session_state.page == "demo":
 
     if question and st.session_state.vectorstore:
         with st.spinner("Searching and generating answer..."):
-            retriever = st.session_state.vectorstore.as_retriever(search_kwargs={"k": 4})
+            retriever = st.session_state.vectorstore.as_retriever(search_kwargs={"k": 6})
             relevant_docs = retriever.invoke(question)
 
             response = answer_question(
@@ -734,6 +729,9 @@ elif st.session_state.page == "demo":
         st.markdown(f'<div class="answer-box">{response}</div>', unsafe_allow_html=True)
 
         with st.expander("Retrieved Context"):
-            for i, doc in enumerate(relevant_docs, start=1):
-                st.markdown(f"Chunk {i}")
-                st.write(doc.page_content[:1500])
+            if relevant_docs:
+                for i, doc in enumerate(relevant_docs, start=1):
+                    st.markdown(f"Chunk {i}")
+                    st.write(doc.page_content[:1500])
+            else:
+                st.write("No relevant context was retrieved.")
