@@ -1,112 +1,61 @@
-import os
-import re
-import tempfile
+from pathlib import Path
+
 import fitz
 import pytesseract
-import docx2txt
-
 from PIL import Image
 from langchain_core.documents import Document
+from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader
 
 
-def looks_like_garbage(text: str) -> bool:
-    if not text or len(text.strip()) < 40:
-        return True
+def extract_text_from_pdf_with_ocr(file_path: str):
+    docs = []
+    pdf = fitz.open(file_path)
 
-    weird_chars = len(re.findall(r"[^a-zA-Z0-9\s,.\-:/@()]", text))
-    ratio = weird_chars / max(len(text), 1)
+    for page_num in range(len(pdf)):
+        page = pdf.load_page(page_num)
+        pix = page.get_pixmap(dpi=300)
+        img_path = Path(file_path).with_suffix(f".page_{page_num + 1}.png")
+        pix.save(str(img_path))
 
-    useful_words = [
-        "name", "date", "document", "invoice", "passport", "bank",
-        "statement", "flight", "ticket", "resume", "education",
-        "experience", "university", "policy", "report", "amount"
-    ]
-    has_useful_words = any(word in text.lower() for word in useful_words)
+        image = Image.open(img_path)
+        ocr_text = pytesseract.image_to_string(image)
 
-    return ratio > 0.25 and not has_useful_words
-
-
-def extract_text_normally_from_pdf(pdf_path: str):
-    documents = []
-    doc = fitz.open(pdf_path)
-
-    for page_num, page in enumerate(doc):
-        text = page.get_text("text")
-        documents.append(
+        docs.append(
             Document(
-                page_content=text,
-                metadata={"source": pdf_path, "page": page_num + 1}
+                page_content=ocr_text,
+                metadata={"source": file_path, "page": page_num + 1, "ocr": True},
             )
         )
 
-    doc.close()
-    return documents
+        try:
+            img_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    pdf.close()
+    return docs
 
 
-def extract_text_with_ocr(pdf_path: str):
-    documents = []
-    doc = fitz.open(pdf_path)
+def load_document(file_path: str, extension: str):
+    extension = extension.lower()
 
-    for page_num, page in enumerate(doc):
-        pix = page.get_pixmap(dpi=200)
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        text = pytesseract.image_to_string(img)
+    if extension == ".pdf":
+        try:
+            loader = PyPDFLoader(file_path)
+            docs = loader.load()
 
-        documents.append(
-            Document(
-                page_content=text,
-                metadata={"source": pdf_path, "page": page_num + 1}
-            )
-        )
+            combined_text = "\n".join(doc.page_content for doc in docs).strip()
 
-    doc.close()
-    return documents
+            # Use normal PDF text whenever it has enough readable content.
+            if combined_text and len(combined_text) >= 100:
+                return docs
 
+            return extract_text_from_pdf_with_ocr(file_path)
+        except Exception:
+            return extract_text_from_pdf_with_ocr(file_path)
 
-def load_pdf(uploaded_file):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-        tmp_file.write(uploaded_file.read())
-        temp_path = tmp_file.name
+    if extension == ".docx":
+        loader = Docx2txtLoader(file_path)
+        return loader.load()
 
-    try:
-        documents = extract_text_normally_from_pdf(temp_path)
-        combined_text = " ".join(doc.page_content for doc in documents[:2])
-
-        if looks_like_garbage(combined_text):
-            documents = extract_text_with_ocr(temp_path)
-
-        return documents
-
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-
-
-def load_docx(uploaded_file):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp_file:
-        tmp_file.write(uploaded_file.read())
-        temp_path = tmp_file.name
-
-    try:
-        text = docx2txt.process(temp_path)
-        return [
-            Document(
-                page_content=text,
-                metadata={"source": uploaded_file.name, "page": 1}
-            )
-        ]
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-
-
-def load_document(uploaded_file):
-    filename = uploaded_file.name.lower()
-
-    if filename.endswith(".pdf"):
-        return load_pdf(uploaded_file)
-
-    if filename.endswith(".docx"):
-        return load_docx(uploaded_file)
-
-    raise ValueError("Unsupported file type. Please upload a PDF or DOCX file.")
+    raise ValueError(f"Unsupported file type: {extension}")
